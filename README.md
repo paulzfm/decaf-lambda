@@ -1,12 +1,10 @@
-# The Decaf Compiler, in Scala
+# Decaf with λ-expressions
 
-Decaf is a Java-like, but much smaller programming language mainly for educational purpose.
-We now have at least three different implementations of the compiler in Java, Scala and Rust.
-Since the standard language has quite a limited set of language features, students are welcome to add their own new features.
+Decaf is a small Java-like language for education purpose. This repository implements new features of λ-expressions, based on the original branch. Apart from MIPS-backend, it also compiles to JVM.
 
 ## Getting Started
 
-This project requires JDK 12, because the package `decaf.lowlevel` is shared with Java's.
+To build this project, you need JDK 14 (NOTE: the original branch was developed under JDK 12).
 
 Other dependencies will be automatically downloaded from the maven central repository by the build script.
 
@@ -55,3 +53,26 @@ Possible targets/tasks are:
 
 To run the MIPS assembly code, you may need [spim](http://spimsimulator.sourceforge.net), a MIPS32 simulator.
 For Mac OS users, simply install `spim` with `brew install spim` and run with `spim -file your_file.s`.
+
+## Demo
+
+The `demo/` folder contains a little testcase with new features. For example, to compile this to JVM:
+
+```
+cd demo/
+mkdir out/
+java -jar ../target/decaf.jar demo/demo.decaf -t PA3-JVM -d out
+cd out/
+java Main
+```
+
+You may use Java disassembly tools to inspect the bytecode generated for this testcase, e.g.
+
+```
+javap -v -p Foo
+javap -v -p Main
+```
+
+## Test
+
+For more testcases with the new λ-expression feature, see [here](https://github.com/decaf-lang/decaf-2019-tests).

@@ -1,0 +1,18 @@
+class Foo {
+     int foo(int x) {
+        int y = 20;
+        var f = fun (int prefix) {
+            int z = x + y; // `x`, `y` are captured
+            return prefix + z;
+        };
+
+        return f(100);
+    }
+}
+
+class Main {
+    static void main() {
+        var obj = new Foo();
+        Print(obj.foo(10));
+    }
+}
