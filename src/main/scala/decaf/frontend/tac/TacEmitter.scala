@@ -2,13 +2,13 @@ package decaf.frontend.tac
 
 import decaf.frontend.annot.SymbolImplicit._
 import decaf.frontend.annot.TypeImplicit._
-import decaf.frontend.annot.{BoolType, IntType, LocalVarSymbol, StringType}
+import decaf.frontend.annot._
 import decaf.frontend.tree.TreeNode
 import decaf.frontend.tree.TypedTree._
 import decaf.lowlevel.StringUtils
 import decaf.lowlevel.instr.Temp
 import decaf.lowlevel.label.Label
-import decaf.lowlevel.tac.{FuncVisitor, Intrinsic, RuntimeError, TacInstr}
+import decaf.lowlevel.tac._
 import decaf.util.Conversions._
 
 import scala.collection.mutable
@@ -21,10 +21,18 @@ trait TacEmitter {
   class Context {
 
     /**
-      * Allocated temps for every local variable.
+      * Allocated temps for every local variable or "this".
       */
-    var vars = new mutable.TreeMap[LocalVarSymbol, Temp]
+    var vars = new mutable.HashMap[CVar, Temp]
   }
+
+  final val FUN_CLASS = "fun$"
+
+  final val nameOfArrayLen = "array$len"
+
+  @inline def nameOf(method: MethodSymbol) = method.owner.name + "$" + method.name
+
+  @inline def nameOf(lambda: LambdaSymbol) = lambda.name
 
   /**
     * Emit code for a statement.
@@ -34,17 +42,23 @@ trait TacEmitter {
     * @param loopExits a list of labels indicating loop exits (the first label is the exit of the current loop)
     * @param fv        function visitor
     */
-  def emitStmt(stmt: Stmt)(implicit ctx: Context, loopExits: List[Label], fv: FuncVisitor): Unit = {
+  def emitStmt(stmt: Stmt)(implicit ctx: Context, loopExits: List[Label], fv: FuncVisitor, pw: ProgramWriter): Unit = {
     stmt match {
       case Block(stmts) => stmts.foreach(emitStmt)
 
       case v: LocalVarDef =>
         val t = fv.freshTemp
-        ctx.vars(v.symbol) = t
+        ctx.vars(CLocal(v.symbol)) = t
         v.init.foreach { expr =>
           val et = emitExpr(expr)
           fv.visitAssign(t, et)
         }
+
+      case v: UntypedLocalVarDef =>
+        val t = fv.freshTemp
+        ctx.vars(CLocal(v.symbol)) = t
+        val et = emitExpr(v.init)
+        fv.visitAssign(t, et)
 
       case Assign(IndexSel(array, index), rhs) =>
         val at = emitExpr(array)
@@ -58,7 +72,7 @@ trait TacEmitter {
         fv.visitMemberWrite(rt, v.owner.name, v.name, t)
       case Assign(LocalVar(v), rhs) =>
         val t = emitExpr(rhs)
-        fv.visitAssign(ctx.vars(v), t)
+        fv.visitAssign(ctx.vars(CLocal(v)), t)
 
       case ExprEval(expr) => emitExpr(expr)
       case Skip() => // nop
@@ -72,12 +86,12 @@ trait TacEmitter {
 
       case While(cond, body) =>
         val exit = fv.freshLabel
-        loop(emitExpr(cond), emitStmt(body)(ctx, exit :: loopExits, fv), exit)
+        loop(emitExpr(cond), emitStmt(body)(ctx, exit :: loopExits, fv, pw), exit)
       case For(init, cond, update, body) =>
         val exit = fv.freshLabel
         emitStmt(init)
         loop(emitExpr(cond), {
-          emitStmt(body)(ctx, exit :: loopExits, fv)
+          emitStmt(body)(ctx, exit :: loopExits, fv, pw)
           emitStmt(update)
         }, exit)
       case Break() => fv.visitBranch(loopExits.head)
@@ -109,7 +123,7 @@ trait TacEmitter {
     * @param fv   function visitor
     * @return a temp storing the value of this expression
     */
-  def emitExpr(expr: Expr)(implicit ctx: Context, fv: FuncVisitor): Temp = {
+  def emitExpr(expr: Expr)(implicit ctx: Context, fv: FuncVisitor, pw: ProgramWriter): Temp = {
     expr match {
       case IntLit(value) => fv.visitLoad(value)
       case BoolLit(value) => fv.visitLoad(value)
@@ -119,7 +133,7 @@ trait TacEmitter {
       case ReadInt() => fv.visitIntrinsicCall(Intrinsic.READ_INT, true)
       case ReadLine() => fv.visitIntrinsicCall(Intrinsic.READ_LINE, true)
 
-      case LocalVar(v) => ctx.vars(v)
+      case LocalVar(v) => ctx.vars(CLocal(v))
 
       case Unary(op, operand) =>
         val opcode = op match {
@@ -159,6 +173,12 @@ trait TacEmitter {
 
         val lt = emitExpr(lhs)
         val rt = emitExpr(rhs)
+        if (op == TreeNode.MOD || op == TreeNode.DIV) { // may throw division by zero error
+          ifNotThen(rt, {
+            fv.visitPrint(RuntimeError.DIVISION_BY_ZERO)
+            fv.visitIntrinsicCall(Intrinsic.HALT)
+          })
+        }
         fv.visitBinary(opcode, lt, rt)
 
       case NewArray(_, length) =>
@@ -172,12 +192,33 @@ trait TacEmitter {
       case ArrayLen(array) =>
         val at = emitExpr(array)
         fv.visitLoadFrom(at, -4)
+      case ArrayLenMethod(array) =>
+        val at = emitExpr(array)
+        val closure = fv.visitIntrinsicCall(Intrinsic.ALLOCATE, true, fv.visitLoad(8))
+        val addr = fv.visitLoadMethodAddressTo(FUN_CLASS, nameOfArrayLen)
+        fv.visitStoreTo(closure, addr) // store the address of the wrapper function
+        fv.visitStoreTo(closure, 4, at) // store the array address
+        closure
 
       case NewClass(clazz) => fv.visitNewClass(clazz.name)
-      case This() => fv.getArgTemp(0)
+      case This() => ctx.vars(CThis)
       case MemberVar(receiver, field) =>
         val rt = emitExpr(receiver)
         fv.visitMemberAccess(rt, field.owner.name, field.name)
+
+      case MemberMethod(receiver, method) =>
+        val rt = emitExpr(receiver)
+        val closure = fv.visitIntrinsicCall(Intrinsic.ALLOCATE, true, fv.visitLoad(8))
+        val addr = fv.visitLoadMethodAddressTo(FUN_CLASS, nameOf(method))
+        fv.visitStoreTo(closure, addr) // store the address of the wrapper function
+        fv.visitStoreTo(closure, 4, rt) // store the special captured var `receiver`
+        closure
+      case StaticMethod(method) =>
+        val closure = fv.visitIntrinsicCall(Intrinsic.ALLOCATE, true, fv.visitLoad(4))
+        val addr = fv.visitLoadMethodAddressTo(FUN_CLASS, nameOf(method))
+        fv.visitStoreTo(closure, addr) // store the address of the wrapper function
+        // NOTE: no captured vars
+        closure
 
       case MemberCall(receiver, method, args) =>
         val rt = emitExpr(receiver)
@@ -238,6 +279,44 @@ trait TacEmitter {
         fv.visitIntrinsicCall(Intrinsic.HALT)
         fv.visitLabel(exit)
         ot
+
+      // function closure object
+      // +0: function pointer
+      // +4: captured values
+      case LambdaExpr(params, body, symbol, captured) =>
+        val sz = fv.visitLoad(4 + 4 * captured.size)
+        val closure = fv.visitIntrinsicCall(Intrinsic.ALLOCATE, true, sz)
+        val addr = fv.visitLoadMethodAddressTo(FUN_CLASS, nameOf(symbol))
+        fv.visitStoreTo(closure, addr) // store the address of the wrapper function
+        captured.zipWithIndex.foreach { // and captured values
+          case (v, i) => fv.visitStoreTo(closure, 4 + 4 * i, ctx.vars(v))
+        }
+
+        { // generate function body, remember the first arg is always the starting address of the captured value list
+          val fv = pw.visitFunc(FUN_CLASS, nameOf(symbol), 1 + params.length)
+          val ctx = new Context
+          params.zipWithIndex.foreach { // setup args, the first one is reserved
+            case (p, i) => ctx.vars(CLocal(p.symbol)) = fv.getArgTemp(i + 1)
+          }
+          captured.zipWithIndex.foreach { // setup captured values, read from memory starting at temp 0
+            case (v, i) =>
+              val temp = fv.visitLoadFrom(fv.getArgTemp(0), 4 * i)
+              ctx.vars(v) = temp
+          }
+          emitStmt(body)(ctx, Nil, fv, pw)
+          fv.visitEnd()
+        }
+
+        closure
+
+      case LambdaCall(func, args) =>
+        val closure = emitExpr(func)
+        val f = fv.visitLoadFrom(closure) // function address
+        // compute the starting address of the captured value list
+        val capturedList = fv.visitBinary(TacInstr.Binary.Op.ADD, closure, fv.visitLoad(4))
+        val normal = args.map(emitExpr) // normal args
+        val as = capturedList :: normal // actual args = starting address of the captured value list :: normal args
+        fv.visitCallByAddress(f, as)
     }
   }
 
@@ -262,6 +341,13 @@ trait TacEmitter {
   private def ifThen(cond: Temp, action: => Unit)(implicit fv: FuncVisitor): Unit = {
     val skip = fv.freshLabel
     fv.visitBranch(TacInstr.CondBranch.Op.BEQZ, cond, skip)
+    action
+    fv.visitLabel(skip)
+  }
+
+  private def ifNotThen(cond: Temp, action: => Unit)(implicit fv: FuncVisitor): Unit = {
+    val skip = fv.freshLabel
+    fv.visitBranch(TacInstr.CondBranch.Op.BNEZ, cond, skip)
     action
     fv.visitLabel(skip)
   }

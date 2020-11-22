@@ -18,7 +18,7 @@ class PrettyScope(printer: IndentPrinter) extends PrettyPrinter[Scope](printer) 
         s.values.foreach { symbol => pretty(symbol.scope) }
       }
     case s: ClassScope =>
-      printer.println(s"CLASS SCOPE OF '${ s.owner.name }':")
+      printer.println(s"CLASS SCOPE OF '${s.owner.name}':")
       indent {
         if (s.isEmpty) {
           printer.println("<empty>")
@@ -31,14 +31,19 @@ class PrettyScope(printer: IndentPrinter) extends PrettyPrinter[Scope](printer) 
         }
       }
     case s: FormalScope =>
-      printer.println(s"FORMAL SCOPE OF '${ s.owner.name }':")
+      printer.println(s"FORMAL SCOPE OF '${s.owner.name}':")
       indent {
         if (s.isEmpty) {
           printer.println("<empty>")
         } else {
-          s.values.foreach { symbol => printer.println(symbol.toString) }
+          s.values.foreach {
+            symbol => printer.println(symbol.toString)
+          }
         }
-        pretty(s.nestedScope)
+        s.owner match {
+          case m: MethodSymbol if m.isAbstract => // no body to print
+          case _ => pretty(s.nestedScope)
+        }
       }
     case s: LocalScope =>
       printer.println(s"LOCAL SCOPE:")

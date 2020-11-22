@@ -285,6 +285,20 @@ public class FuncVisitor {
         visitIntrinsicCall(func, false, args);
     }
 
+    public Temp visitCallByAddress(Temp func, List<Temp> args) {
+        for (var arg : args) {
+            this.func.add(new TacInstr.Parm(arg));
+        }
+        var temp = freshTemp();
+        this.func.add(new TacInstr.IndirectCall(temp, func));
+        return temp;
+    }
+
+    public Temp visitLoadMethodAddressTo(String clazz, String method) {
+        var vtbl = visitLoadVTable(clazz);
+        return visitLoadFrom(vtbl, ctx.getOffset(clazz, method));
+    }
+
     /**
      * Append an instruction to print a string.
      *

@@ -14,6 +14,12 @@ trait Util {
     */
   val JAVA_SUPER_INTERNAL_NAME = ASMType.getInternalName(classOf[java.lang.Object])
 
+  val JAVA_SUPER_TYPE = ASMType.getType(classOf[java.lang.Object])
+
+  val JAVA_INTEGER_INTERNAL_NAME = ASMType.getInternalName(classOf[java.lang.Integer])
+
+  val JAVA_BOOLEAN_INTERNAL_NAME = ASMType.getInternalName(classOf[java.lang.Boolean])
+
   /**
     * Default name of constructors.
     */
@@ -28,6 +34,13 @@ trait Util {
     * Type descriptor of main method.
     */
   val MAIN_DESCRIPTOR: String = "([Ljava/lang/String;)V"
+
+  val LAMBDA_FACTORY_INTERNAL_NAME = ASMType.getInternalName(classOf[java.lang.invoke.LambdaMetafactory])
+
+  val META_FACTORY = "metafactory"
+
+  val META_FACTORY_DESC = ASMType.getMethodDescriptor(
+    classOf[java.lang.invoke.LambdaMetafactory].getDeclaredMethods.find(_.getName == META_FACTORY).get)
 
   /**
     * Emit bytecode for if-then-else branching. The boolean value of condition shall now be on the stack top.
@@ -149,8 +162,16 @@ trait Util {
     case VoidType => ASMType.VOID_TYPE
     case ClassType(name, _) => ASMType.getObjectType(name)
     case ArrayType(elemType) => ASMType.getType('[' + toASMType(elemType).getDescriptor)
-    case FunType(params, ret) => ASMType.getMethodType(toASMType(ret), params.map(toASMType): _*)
+    case t: FunType => interfaceOf(t).classType
   }
+
+  def toBoxType(typ: Type): ASMType = typ match {
+    case IntType => ASMType.getType(classOf[java.lang.Integer])
+    case BoolType => ASMType.getType(classOf[java.lang.Boolean])
+    case t => toASMType(t)
+  }
+
+  def toASMMethodType(ret: ASMType, params: List[ASMType]): ASMType = ASMType.getMethodType(ret, params: _*)
 
   /**
     * Get the internal name of a class symbol.
@@ -161,13 +182,16 @@ trait Util {
   def internalName(clazz: ClassSymbol): String = toASMType(clazz.typ).getInternalName
 
   /**
-    * Get the (type) descriptor of a field symbol.
+    * Get the (type) descriptor of a symbol.
     * See https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.3 for descriptor syntax.
     *
-    * @param field the field symbol, i.e. member var/method
+    * @param symbol the symbol
     * @return its descriptor
     */
-  def descriptor(field: FieldSymbol): String = toASMType(field.typ).getDescriptor
+  def descriptor(symbol: Symbol): String = symbol match {
+    case m: MethodSymbol => ASMType.getMethodDescriptor(toASMType(m.typ.ret), m.typ.args.map(toASMType): _*)
+    case s => toASMType(s.typ).getDescriptor
+  }
 
   // -----------------------------------------------------------------------------------------------
   // The following group of methods handle selection choice based on types. Since JVM has NO useful
@@ -279,4 +303,30 @@ trait Util {
     mv.visitInsn(Opcodes.ICONST_1)
     mv.visitLabel(exitLabel)
   }
+
+  // lambda
+  trait FunctionalInterface {
+    def classType: ASMType
+
+    def applyType: ASMType
+  }
+
+  case class Function(arity: Int) extends FunctionalInterface {
+    val classType = ASMType.getObjectType(toString)
+
+    val applyType = ASMType.getMethodType(JAVA_SUPER_TYPE, Seq.fill(arity)(JAVA_SUPER_TYPE): _*)
+
+    override def toString: String = "Function$" + arity
+  }
+
+  case class Action(arity: Int) extends FunctionalInterface {
+    val classType = ASMType.getObjectType(toString)
+
+    val applyType = ASMType.getMethodType(ASMType.VOID_TYPE, Seq.fill(arity)(JAVA_SUPER_TYPE): _*)
+
+    override def toString: String = "Action$" + arity
+  }
+
+  def interfaceOf(t: FunType): FunctionalInterface =
+    if (t.ret.isVoidType) Action(t.args.length) else Function(t.args.length)
 }

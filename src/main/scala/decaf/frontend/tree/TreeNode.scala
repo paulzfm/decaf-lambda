@@ -208,13 +208,15 @@ object TreeNode {
     * In particular, the original Decaf language only has one modifier -- static. If a method is static, then the
     * lowest bit is set.
     */
-  class Modifiers(val code: Int = 0, val pos: Pos = NoPos) {
+  case class Modifiers(code: Int = 0, pos: Pos = NoPos) {
 
     def isStatic: Boolean = (code & 1) == 1
 
+    def isAbstract: Boolean = (code & 2) >> 1 == 1
+
     def isEmpty: Boolean = code == 0
 
-    private lazy val flags = if (isStatic) List("STATIC") else Nil
+    private lazy val flags = (if (isStatic) List("STATIC") else Nil) ++ (if (isAbstract) List("ABSTRACT") else Nil)
 
     override def toString: String = flags.mkString(" ")
   }
@@ -222,6 +224,8 @@ object TreeNode {
   object Modifiers {
 
     val STATIC = 1
+
+    val ABSTRACT = 2
   }
 
 }

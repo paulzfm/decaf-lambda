@@ -5,9 +5,10 @@ import decaf.driver.{Config, Phase}
 import decaf.frontend.annot.SymbolImplicit._
 import decaf.frontend.annot.TypeImplicit._
 import decaf.frontend.annot._
+import decaf.frontend.tree.NamedTree.TypedTypeLit
 import decaf.frontend.tree.SyntaxTree._
 import decaf.frontend.tree.TreeNode._
-import decaf.frontend.tree.{TypedTree => Typed}
+import decaf.frontend.tree.{NamedTree => Named}
 
 import scala.collection.mutable
 
@@ -56,7 +57,7 @@ import scala.collection.mutable
   * @see [[decaf.frontend.annot.Scope]]
   * @see [[decaf.frontend.annot.Symbol]]
   */
-class Namer(implicit config: Config) extends Phase[Tree, Typed.Tree]("namer", config) with Util {
+class Namer(implicit config: Config) extends Phase[Tree, Named.Tree]("namer", config) with Util {
 
   class Context {
 
@@ -70,7 +71,7 @@ class Namer(implicit config: Config) extends Phase[Tree, Typed.Tree]("namer", co
     * @param tree an (untyped) abstract syntax tree
     * @return a typed tree with untyped holes
     */
-  override def transform(tree: Tree): Typed.Tree = {
+  override def transform(tree: Tree): Named.Tree = {
     implicit val ctx = new Context
 
     // Check conflicting definitions. If any, ignore the redefined ones.
@@ -96,7 +97,7 @@ class Namer(implicit config: Config) extends Phase[Tree, Typed.Tree]("namer", co
     // Make sure any inheritance does not form a cycle.
     checkCycles()
     // If so, return with errors.
-    if (hasError) return Typed.TopLevel(Nil)(ctx.global)
+    if (hasError) return Named.TopLevel(Nil)(ctx.global)
 
     // So far, class inheritance is well-formed, i.e. inheritance relations form a forest of trees. Now we need to
     // resolve every class definition, make sure that every member (variables and methods) is well-typed.
@@ -113,7 +114,7 @@ class Namer(implicit config: Config) extends Phase[Tree, Typed.Tree]("namer", co
     // Finally, let's locate the main class, whose name is 'Main', and contains a method like:
     //  static void main() { ... }
     resolvedClasses.find(_.name == "Main") match {
-      case Some(clazz) =>
+      case Some(clazz) if !clazz.symbol.isAbstract =>
         clazz.symbol.scope.find("main") match {
           case Some(symbol) =>
             symbol match {
@@ -122,10 +123,10 @@ class Namer(implicit config: Config) extends Phase[Tree, Typed.Tree]("namer", co
             }
           case _ => issue(NoMainClassError)
         }
-      case None => issue(NoMainClassError)
+      case _ => issue(NoMainClassError)
     }
 
-    Typed.TopLevel(resolvedClasses)(ctx.global).setPos(tree.pos)
+    Named.TopLevel(resolvedClasses)(ctx.global).setPos(tree.pos)
   }
 
   /**
@@ -133,7 +134,9 @@ class Namer(implicit config: Config) extends Phase[Tree, Typed.Tree]("namer", co
     */
   private def checkCycles()(implicit ctx: Context): Unit = {
     val visitedTime = new mutable.TreeMap[String, Int]
-    ctx.classes.keys.foreach { visitedTime(_) = 0 }
+    ctx.classes.keys.foreach {
+      visitedTime(_) = 0
+    }
 
     @scala.annotation.tailrec
     def visit(from: ClassDef, node: String, time: Int): Unit = {
@@ -193,8 +196,9 @@ class Namer(implicit config: Config) extends Phase[Tree, Typed.Tree]("namer", co
     * @param ctx context
     * @return resolved classes
     */
-  def resolveClasses(implicit ctx: Context): List[Typed.ClassDef] = {
-    val resolved = new mutable.TreeMap[String, Typed.ClassDef]
+  def resolveClasses(implicit ctx: Context): List[Named.ClassDef] = {
+    val resolved = new mutable.TreeMap[String, Named.ClassDef]
+    val absTable = new mutable.TreeMap[String, Set[MethodSymbol]]
 
     def resolve(clazz: ClassDef): Unit = {
       if (!resolved.contains(clazz.name)) {
@@ -206,9 +210,20 @@ class Namer(implicit config: Config) extends Phase[Tree, Typed.Tree]("namer", co
             ctx.global(clazz.name)
         }
 
-        implicit val classCtx: ScopeContext = new ScopeContext(ctx.global).open(symbol.scope)
-        val fs = clazz.fields.flatMap(resolveField)
-        resolved(clazz.name) = Typed.ClassDef(clazz.id, symbol.parent, fs)(symbol).setPos(clazz.pos)
+        val classCtx: ScopeContext = new ScopeContext(ctx.global).open(symbol.scope)
+        val toOverride = clazz.parent match {
+          case None => mutable.TreeSet[MethodSymbol]()
+          case Some(b) => mutable.TreeSet.from(absTable(b))
+        }
+        val fs = clazz.fields.flatMap {
+          resolveField(_)(classCtx, toOverride)
+        }
+        resolved(clazz.name) = Named.ClassDef(clazz.modifiers, clazz.id, symbol.parent, fs)(symbol).setPos(clazz.pos)
+        absTable(clazz.name) = toOverride.toSet
+
+        if (!clazz.modifiers.isAbstract && toOverride.nonEmpty) {
+          issue(new ClassNotAbstractError(clazz.name, clazz.pos))
+        }
       }
     }
 
@@ -223,7 +238,8 @@ class Namer(implicit config: Config) extends Phase[Tree, Typed.Tree]("namer", co
     * @param ctx   scope context
     * @return resolved field
     */
-  def resolveField(field: Field)(implicit ctx: ScopeContext): Option[Typed.Field] = {
+  def resolveField(field: Field)(implicit ctx: ScopeContext,
+                                 abstractMethods: mutable.Set[MethodSymbol]): Option[Named.Field] = {
     val resolved = ctx.findConflict(field.name) match {
       case Some(earlier) if earlier.domain == ctx.currentScope => // always conflict
         issue(new DeclConflictError(field.name, earlier.pos, field.pos)); None
@@ -232,33 +248,46 @@ class Namer(implicit config: Config) extends Phase[Tree, Typed.Tree]("namer", co
           case (_: MemberVarSymbol, _: VarDef) =>
             issue(new OverridingVarError(field.name, field.pos))
             None
-          case (suspect: MethodSymbol, m @ MethodDef(mod, id, returnType, params, body))
+          case (suspect: MethodSymbol, m@MethodDef(mod, id, returnType, params, body))
             if !suspect.isStatic && !m.isStatic =>
-            // Only non-static methods can be overriden, but the type signature must be equivalent.
-            val ret = typeTypeLit(returnType)
-            ret.typ match {
-              case NoType => None
-              case retType =>
-                val formalScope = new FormalScope
-                val formalCtx = ctx.open(formalScope)
-                if (!m.isStatic) formalCtx.declare(LocalVarSymbol.thisVar(ctx.currentClass.typ, id.pos))
-                val typedParams = params.flatMap { resolveLocalVarDef(_)(formalCtx, true) }
-                val funType = FunType(typedParams.map(_.typeLit.typ), retType)
-                if (funType <= suspect.typ) { // override success
-                  val symbol = new MethodSymbol(m, funType, formalScope, ctx.currentClass)
-                  ctx.declare(symbol)
-                  val block = resolveBlock(body)(formalCtx)
-                  Some(Typed.MethodDef(mod, id, ret, typedParams, block)(symbol))
-                } else { // override failure
-                  issue(new BadOverrideError(m.name, suspect.owner.name, m.pos))
-                  None
-                }
+
+            // Cannot override a concrete method with abstract.
+            if (m.isAbstract && !suspect.isAbstract) {
+              issue(new DeclConflictError(field.name, earlier.pos, field.pos))
+              None
+            } else {
+              val ret = typeTypeLit(returnType)
+              ret.typ match {
+                case NoType => None
+                case retType =>
+                  val formalScope = new FormalScope
+                  val formalCtx = ctx.open(formalScope)
+                  if (!m.isStatic) formalCtx.declare(LocalVarSymbol.thisVar(ctx.currentClass.typ, id.pos))
+                  val typedParams = params.map {
+                    resolveLocalVarDef(_)(formalCtx)
+                  }
+                  val funType = FunType(typedParams.map(_.typeLit.typ), retType)
+                  if (funType <= suspect.typ) { // override success
+                    val symbol = new MethodSymbol(m, funType, formalScope, ctx.currentClass)
+                    ctx.declare(symbol)
+                    // Possibly override an abstract method.
+                    if (suspect.isAbstract) abstractMethods -= suspect
+                    if (m.isAbstract) abstractMethods += symbol
+                    val block = body.map {
+                      resolveBlock(_)(formalCtx)
+                    }
+                    Some(Named.MethodDef(mod, id, TypedTypeLit(ret)(ret.typ), typedParams, block)(symbol))
+                  } else { // override failure
+                    issue(new BadOverrideError(m.name, suspect.owner.name, m.pos))
+                    None
+                  }
+              }
             }
           case _ => issue(new DeclConflictError(field.name, earlier.pos, field.pos)); None
         }
       case None =>
         field match {
-          case v @ VarDef(typeLit, id) =>
+          case v@VarDef(typeLit, id) =>
             val lit = typeTypeLit(typeLit)
             lit.typ match {
               case NoType => None
@@ -268,24 +297,30 @@ class Namer(implicit config: Config) extends Phase[Tree, Typed.Tree]("namer", co
               case t =>
                 val symbol = new MemberVarSymbol(v, t, ctx.currentClass)
                 ctx.declare(symbol)
-                Some(Typed.VarDef(lit, id)(symbol))
+                Some(Named.VarDef(TypedTypeLit(lit)(lit.typ), id)(symbol))
             }
-          case m @ MethodDef(mod, id, returnType, params, body) =>
+          case m@MethodDef(mod, id, returnType, params, body) =>
             val rt = typeTypeLit(returnType)
             val retType = rt.typ
             val formalScope = new FormalScope
             val formalCtx: ScopeContext = ctx.open(formalScope)
             if (!m.isStatic) formalCtx.declare(LocalVarSymbol.thisVar(ctx.currentClass.typ, id.pos))
-            val typedParams = params.flatMap { resolveLocalVarDef(_)(formalCtx, true) }
-            val funType = FunType(typedParams.map(_.typeLit.typ), retType)
+            val ps = params.map {
+              resolveLocalVarDef(_)(formalCtx)
+            }
+            val funType = FunType(ps.map{ _.typeLit.typ }, retType)
             val symbol = new MethodSymbol(m, funType, formalScope, ctx.currentClass)
             ctx.declare(symbol)
-            val block = resolveBlock(body)(formalCtx)
-            Some(Typed.MethodDef(mod, id, rt, typedParams, block)(symbol))
+            if (m.isAbstract) abstractMethods += symbol
+            val block = body.map {
+              resolveBlock(_)(formalCtx)
+            }
+            Some(Named.MethodDef(mod, id, TypedTypeLit(rt)(rt.typ), ps, block)(symbol))
         }
     }
     resolved.map(_.setPos(field.pos))
   }
+
 
   /**
     * Resolve a statement block.
@@ -294,76 +329,145 @@ class Namer(implicit config: Config) extends Phase[Tree, Typed.Tree]("namer", co
     * @param ctx   scope context
     * @return resolved block
     */
-  def resolveBlock(block: Block)(implicit ctx: ScopeContext): Typed.Block = {
+  def resolveBlock(block: Block)(implicit ctx: ScopeContext): Named.Block = {
     val localScope = ctx.currentScope match {
       case s: FormalScope => s.nestedScope
       case s: LocalScope =>
-        s.nestedScopes += new LocalScope
-        s.nestedScopes.last
+        val local = new LocalScope
+        s.nestedScopes += local
+        local
     }
     val localCtx = ctx.open(localScope)
-    val ss = block.stmts.map { resolveStmt(_)(localCtx) }
-    Typed.Block(ss)(localScope).setPos(block.pos)
+    val ss = block.stmts.map {
+      resolveStmt(_)(localCtx)
+    }
+    Named.Block(ss)(localScope).setPos(block.pos)
   }
 
-  def resolveStmt(stmt: Stmt)(implicit ctx: ScopeContext): Typed.Stmt = {
-    val checked = stmt match {
+  def resolveStmt(stmt: Stmt)(implicit ctx: ScopeContext): Named.Stmt = {
+    val resolved = stmt match {
       case block: Block => resolveBlock(block)
-      case v: LocalVarDef => resolveLocalVarDef(v).getOrElse(Typed.Skip())
-      case Assign(lhs, rhs) => Typed.Assign(lhs, rhs)
-      case ExprEval(expr) => Typed.ExprEval(expr)
-      case Skip() => Typed.Skip()
+      case v: LocalVarDef => resolveLocalVarDef(v)
+      case v: UntypedLocalVarDef => resolveUntypedLocalVarDef(v)
+      case Assign(lhs, rhs) => Named.Assign(resolveLValue(lhs), resolveExpr(rhs))
+      case ExprEval(expr) => Named.ExprEval(resolveExpr(expr))
+      case Skip() => Named.Skip()
       case If(cond, trueBranch, falseBranch) =>
-        val t = resolveBlock(trueBranch)
-        val f = falseBranch.map(resolveBlock)
-        Typed.If(cond, t, f)
-      case While(cond, body) => Typed.While(cond, resolveBlock(body))
+        Named.If(resolveExpr(cond), resolveBlock(trueBranch), falseBranch map resolveBlock)
+      case While(cond, body) => Named.While(resolveExpr(cond), resolveBlock(body))
       case For(init, cond, update, body) =>
         // Since `init` and `update` may declare local variables, we must first open the local scope of `body`, and
         // then resolve `init`, `update` and statements inside `body`.
         val localScope = new LocalScope
-        ctx.currentScope.asInstanceOf[LocalScope].nestedScopes += localScope
+        ctx.currentScope match {
+          case s: LocalScope => s.nestedScopes += localScope
+        }
         val localCtx = ctx.open(localScope)
         val i = resolveStmt(init)(localCtx)
         val u = resolveStmt(update)(localCtx)
-        val ss = body.stmts.map { resolveStmt(_)(localCtx) }
-        val b = Typed.Block(ss)(localScope).setPos(body.pos)
-        Typed.For(i, cond, u, b)
-      case Break() => Typed.Break()
-      case Return(expr) => Typed.Return(expr)
-      case Print(exprs) => Typed.Print(exprs)
+        val ss = body.stmts.map {
+          resolveStmt(_)(localCtx)
+        }
+        val b = Named.Block(ss)(localScope).setPos(body.pos)
+        Named.For(i, resolveExpr(cond), u, b)
+      case Break() => Named.Break()
+      case Return(expr) => Named.Return(expr map resolveExpr)
+      case Print(exprs) => Named.Print(exprs map resolveExpr)
     }
-    checked.setPos(stmt.pos)
+    resolved.setPos(stmt.pos)
   }
 
-  def resolveLocalVarDef(v: LocalVarDef)
-                        (implicit ctx: ScopeContext, isParam: Boolean = false): Option[Typed.LocalVarDef] = {
-    ctx.findConflict(v.name) match {
+  @inline
+  def resolveLocalVarDef(v: LocalVarDef)(implicit ctx: ScopeContext): Named.LocalVarDef = {
+    ctx.findConflictBefore(v.name, v.pos) match {
       case Some(earlier) =>
         issue(new DeclConflictError(v.name, earlier.pos, v.pos))
-        // NOTE: when type check a method, even though this parameter is conflicting, we still need to know what is the
-        // type. Suppose this type is ok, we can still construct the full method type signature, to the user's
-        // expectation.
-        if (isParam) {
-          val typedTypeLit = typeTypeLit(v.typeLit)
-          Some(Typed.LocalVarDef(typedTypeLit, v.id, v.init, v.assignPos)(null))
-        } else {
-          None
-        }
+        val t = typeTypeLit(v.typeLit)
+        Named.LocalVarDef(Named.TypedTypeLit(t)(t.typ), v.id, v.init map resolveExpr, v.assignPos)(DummyLocalVar)
       case None =>
-        val typedTypeLit = typeTypeLit(v.typeLit)
-        typedTypeLit.typ match {
+        val t = typeTypeLit(v.typeLit)
+        val symbol = t.typ match {
           case NoType =>
             // NOTE: to avoid flushing a large number of error messages, if we know one error is caused by another,
             // then we shall not report both, but the earlier found one only. In this case, the error of the entire
             // LocalVarDef is caused by the bad typeLit, and thus we don't make further type check.
-            None
-          case VoidType => issue(new BadVarTypeError(v.name, v.pos)); None
+            DummyLocalVar
+          case VoidType => issue(new BadVarTypeError(v.name, v.pos)); DummyLocalVar
           case t =>
             val symbol = new LocalVarSymbol(v, t)
             ctx.declare(symbol)
-            Some(Typed.LocalVarDef(typedTypeLit, v.id, v.init, v.assignPos)(symbol))
+            symbol
         }
+        Named.LocalVarDef(Named.TypedTypeLit(t)(t.typ), v.id, v.init map resolveExpr, v.assignPos)(symbol)
     }
+  }
+
+  @inline
+  def resolveUntypedLocalVarDef(v: UntypedLocalVarDef)
+                               (implicit ctx: ScopeContext): Named.UntypedLocalVarDef = {
+    ctx.findConflictBefore(v.name, v.pos) match {
+      case Some(earlier) =>
+        issue(new DeclConflictError(v.name, earlier.pos, v.pos))
+        Named.UntypedLocalVarDef(v.id, resolveExpr(v.init), v.assignPos)(DummyLocalVar)
+      case None =>
+        val symbol = new LocalVarSymbol(v.name, NoType, v.pos)
+        ctx.declare(symbol)
+        Named.UntypedLocalVarDef(v.id, resolveExpr(v.init), v.assignPos)(symbol)
+    }
+  }
+
+  implicit val noType: NoType.type = NoType
+
+  def resolveExpr(expr: Expr)(implicit ctx: ScopeContext): Named.Expr = {
+    val resolved = expr match {
+      case e: LValue => resolveLValue(e)
+
+      case Lambda(params, e) =>
+        val e1 = BlockLambda(params, Block(List(Return(Some(e))))).setPos(expr.pos)
+        resolveExpr(e1)
+
+      case BlockLambda(params, body) =>
+        val formalScope = new FormalScope
+        ctx.currentScope match {
+          case s: LocalScope => s.nestedScopes += formalScope
+        }
+        val formalCtx = ctx.open(formalScope)
+        val ps = params.map {
+          resolveLocalVarDef(_)(formalCtx)
+        }
+        val b = resolveBlock(body)(formalCtx)
+        val funType = FunType(ps.map(_.typeLit.typ), NoType)
+        val symbol = new LambdaSymbol(expr.pos, funType, formalScope)
+        ctx.declare(symbol)
+
+        Named.LambdaExpr(ps, b, symbol)
+
+      // others: just resolve every subexpression, if any
+      case IntLit(v) => Named.IntLit(v)
+      case BoolLit(v) => Named.BoolLit(v)
+      case StringLit(v) => Named.StringLit(v)
+      case NullLit() => Named.NullLit()
+      case ReadInt() => Named.ReadInt()
+      case ReadLine() => Named.ReadLine()
+      case Unary(op, operand) => Named.Unary(op, resolveExpr(operand))
+      case Binary(op, lhs, rhs) => Named.Binary(op, resolveExpr(lhs), resolveExpr(rhs))
+      case NewArray(elemType, length) =>
+        val t = typeTypeLit(elemType)
+        Named.NewArray(Named.TypedTypeLit(t)(t.typ), resolveExpr(length))
+      case NewClass(clazz) => Named.NewClass(clazz)
+      case This() => Named.This()
+      case Call(method, args) => Named.Call(resolveExpr(method), args map resolveExpr)
+      case ClassCast(obj, to) => Named.ClassCast(resolveExpr(obj), to)
+      case ClassTest(obj, is) => Named.ClassTest(resolveExpr(obj), is)
+    }
+    resolved.setPos(expr.pos)
+  }
+
+  def resolveLValue(expr: LValue)(implicit ctx: ScopeContext): Named.LValue = {
+    val resolved = expr match {
+      case VarSel(receiver, name) => Named.VarSel(receiver map resolveExpr, name)
+      case IndexSel(array, index) => Named.IndexSel(resolveExpr(array), resolveExpr(index))
+    }
+    resolved.setPos(expr.pos)
   }
 }

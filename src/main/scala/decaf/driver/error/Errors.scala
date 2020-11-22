@@ -141,3 +141,29 @@ class BadArgTypeError(k: Int, expected: Type, actual: Type, pos: Pos)
 
 class BadLengthArgError(count: Int, pos: Pos)
   extends Error(s"function 'length' expects 0 argument(s) but $count given", pos)
+
+// new
+
+class ClassNotAbstractError(clazz: String, pos: Pos)
+  extends Error(s"'$clazz' is not abstract and does not override all abstract methods", pos)
+
+class CannotInstantiateError(clazz: String, pos: Pos)
+  extends Error(s"cannot instantiate abstract class '$clazz'", pos)
+
+class BadFuncArgTypeError(pos: Pos)
+  extends Error("arguments in function type must be non-void known type", pos)
+
+class NotCallableError(typ: Type, pos: Pos)
+  extends Error(s"$typ is not a callable type", pos)
+
+class LambdaBadArgCountError(expected: Int, actual: Int, pos: Pos)
+  extends Error(s"lambda expression expects $expected argument(s) but $actual given", pos)
+
+class CannotAssignToCapturedError(pos: Pos)
+  extends Error("cannot assign value to captured variables in lambda expression", pos)
+
+class CannotAssignToMethodError(method: String, pos: Pos)
+  extends Error(s"cannot assign value to class member method '$method'", pos)
+
+class IncompatibleReturnTypesError(pos: Pos)
+  extends Error("incompatible return types in blocked expression", pos)

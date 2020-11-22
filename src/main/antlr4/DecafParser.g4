@@ -5,11 +5,11 @@ options { tokenVocab=DecafLexer; }
 // Classes and fields
 
 topLevel
-    : classDef* EOF
+    : classDef*
     ;
 
 classDef
-    : CLASS id extendsClause? '{' field* '}'
+    : ABSTRACT? CLASS id extendsClause? '{' field* '}'
     ;
 
 extendsClause
@@ -26,7 +26,8 @@ varDef
     ;
 
 methodDef
-    : STATIC? type id '(' varList ')' stmtBlock
+    : ABSTRACT type id '(' varList ')' ';'
+    | STATIC? type id '(' varList ')' stmtBlock
     ;
 
 var
@@ -47,6 +48,11 @@ type
     | VOID                      # voidType
     | CLASS id                  # classType
     | elemType=type '[' ']'     # arrayType
+    | retType=type '(' typeList ')'  # funType
+    ;
+
+typeList
+    : (type (',' type)*)?
     ;
 
 // Statements
@@ -69,6 +75,7 @@ stmtBlock
 simple
     : lValue '=' expr    # assign
     | var ('=' expr)?    # localVarDef
+    | VAR id '=' expr    # localVarDefInfer
     | expr               # eval
     | /* empty */        # skip
     ;
@@ -89,8 +96,9 @@ expr
     | NEW elemType=type '[' length=expr ']'         # newArray
     | INSTANCEOF '(' expr ',' id ')'                # classTest
     | '(' expr ')'                                  # paren
-    | varSelOrCall                                  # singlePath
-    | expr '.' varSelOrCall                         # path
+    | id                                            # varSel
+    | expr '.' id                                   # varSelRecv
+    | expr '(' exprList ')'                         # call
     | array=expr '[' index=expr ']'                 # indexSel
     | '(' CLASS id ')' expr                         # classCast
     | prefix=('-'|'!') expr                         # unary
@@ -100,6 +108,8 @@ expr
     | lhs=expr infix=('=='|'!=') rhs=expr           # binary
     | lhs=expr infix='&&' rhs=expr                  # binary
     | lhs=expr infix='||' rhs=expr                  # binary
+    | FUN '(' varList ')' '=>' expr                # lambda
+    | FUN '(' varList ')' stmtBlock                # blockLambda
     ;
 
 lit
@@ -114,10 +124,6 @@ stringChar
     | ESC
     | BAD_ESC
     | VALID_CHAR
-    ;
-
-varSelOrCall
-    : id ('(' exprList ')')?
     ;
 
 exprList

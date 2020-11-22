@@ -198,9 +198,9 @@ case class FunType(args: List[Type], ret: Type) extends Type {
   override def toString: String = {
     val ps = args match {
       case Nil => "()"
-      case (t @ FunType(_, _)) :: Nil => s"($t)"
+      case (t@FunType(_, _)) :: Nil => s"($t)"
       case t :: Nil => t.toString
-      case ts => s"(${ ts.mkString(", ") })"
+      case ts => s"(${ts.mkString(", ")})"
     }
     s"$ps => $ret"
   }
@@ -218,6 +218,45 @@ object NoType extends Type {
   override def toString: String = "Error"
 }
 
+object Type {
+  def lub(t1: Type, t2: Type): Type =
+    if (t1 === t2) t1
+    else (t1, t2) match {
+      case (FunType(xs1, y1), FunType(xs2, y2)) if xs1.length == xs2.length =>
+        val xs = (xs1 zip xs2).map { case (a, b) => glb(a, b) }
+        if (xs.exists(!_.noError)) return NoType
+        val y = lub(y1, y2)
+        if (!y.noError) return NoType
+        FunType(xs, y)
+      case (NullType, ClassType(_, _)) => t2
+      case (ClassType(_, _), NullType) => t1
+      case (ClassType(c1, Some(p1)), ClassType(c2, Some(p2))) =>
+        val ans1 = lub(ClassType(c1, Some(p1)), p2)
+        val ans2 = lub(ClassType(c2, Some(p2)), p1)
+        glb(ans1, ans2)
+      case (ClassType(c1, p1), ClassType(_, Some(p))) => lub(ClassType(c1, p1), p)
+      case (ClassType(_, Some(p)), ClassType(c1, p1)) => lub(ClassType(c1, p1), p)
+      case _ => NoType
+    }
+
+  def glb(t1: Type, t2: Type): Type =
+    if (t1 === t2) t1
+    else (t1, t2) match {
+      case (FunType(xs1, y1), FunType(xs2, y2)) if xs1.length == xs2.length =>
+        val xs = (xs1 zip xs2).map { case (a, b) => lub(a, b) }
+        if (xs.exists(!_.noError)) return NoType
+        val y = glb(y1, y2)
+        if (!y.noError) return NoType
+        FunType(xs, y)
+      case (NullType, ClassType(_, _)) => NullType
+      case (ClassType(_, _), NullType) => NullType
+      case (c1, c2) if c1 <= c2 => c1
+      case (c1, c2) if c2 <= c1 => c2
+        // TODO
+      case _ => NoType
+    }
+}
+
 object TypeImplicit {
 
   implicit class TypeAnnotatedHasType(self: Annotated[Type]) {
@@ -226,7 +265,6 @@ object TypeImplicit {
       * Access a node that is annotated with a [[Type]] by the field name `typ`.
       *
       * @example If `x` is annotated with a [[FunType]], then {{{ x.typ }}} gives you {{{ x.annot: FunType }}}.
-      *
       * @return the annotation
       */
     def typ: Type = self.annot

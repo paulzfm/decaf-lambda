@@ -39,7 +39,16 @@ trait Util extends ErrorIssuer {
           case t => ArrayType(t)
         }
         Typed.TArray(typedElemType)(typ)
+
+      case TLambda(retType, argTypes) =>
+        val r = typeTypeLit(retType)
+        val as = argTypes.map(typeTypeLit)
+        as.foreach { a =>
+          if (a.typ.isVoidType) issue(new BadFuncArgTypeError(a.pos))
+        }
+        Typed.TLambda(r, as)(FunType(as.map(_.typ), r.typ))
     }
     typed.setPos(typeLit.pos)
   }
+
 }

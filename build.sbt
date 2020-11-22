@@ -28,10 +28,3 @@ antlr4GenVisitor in Antlr4 := true // default: false
 // assembly
 
 assemblyOutputPath in assembly := file("target/decaf.jar")
-
-// java 12
-
-javacOptions in Compile += "--enable-preview"
-javacOptions in Compile ++= Seq("-source", "12")
-javaOptions += "--enable-preview"
-fork in run := true

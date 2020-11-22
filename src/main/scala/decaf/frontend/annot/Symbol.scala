@@ -2,7 +2,7 @@ package decaf.frontend.annot
 
 import java.util.TreeSet
 
-import decaf.frontend.parsing.Pos
+import decaf.frontend.parsing.{NoPos, Pos}
 import decaf.frontend.tree.SyntaxTree
 import decaf.frontend.tree.SyntaxTree._
 import decaf.frontend.tree.TreeNode.Var
@@ -39,7 +39,7 @@ sealed trait Symbol extends Annot with Ordered[Symbol] {
     */
   var domain: Scope = _
 
-  override def toString: String = s"(${ pos.line },${ pos.column }) -> " + str
+  override def toString: String = s"(${pos.line},${pos.column}) -> " + str
 
   /** Symbols are compared by their positions. */
   override def compare(that: Symbol): Int = this.pos.compare(that.pos)
@@ -62,7 +62,10 @@ class ClassSymbol(tree: ClassDef, val typ: ClassType, val scope: ClassScope, val
 
   override def pos: Pos = tree.pos
 
-  override def str: String = s"class $name" + (if (parent.isDefined) s" : ${ parent.get.name }" else "")
+  override def str: String = (if (tree.modifiers.isEmpty) "" else s"${tree.modifiers} ") +
+    s"class $name" + (if (parent.isDefined) s" : ${parent.get.name}" else "")
+
+  val isAbstract = tree.modifiers.isAbstract
 
   scope.owner = this
 
@@ -118,6 +121,10 @@ class MemberVarSymbol(tree: Var, val typ: Type, val owner: ClassSymbol) extends 
   override def str: String = s"variable $name : $typ"
 }
 
+trait FuncSymbol extends Symbol {
+  type Typ = FunType
+}
+
 /**
   * Method symbol, representing a method definition.
   *
@@ -127,16 +134,14 @@ class MemberVarSymbol(tree: Var, val typ: Type, val owner: ClassSymbol) extends 
   * @param owner owner, a class symbol
   */
 class MethodSymbol(tree: SyntaxTree.MethodDef, val typ: FunType, val scope: FormalScope, val owner: ClassSymbol)
-  extends FieldSymbol {
-
-  type Typ = FunType
+  extends FieldSymbol with FuncSymbol {
 
   override def name: String = tree.name
 
   override def pos: Pos = tree.pos
 
   override def str: String =
-    (if (tree.modifiers.isEmpty) "" else s"${ tree.modifiers } ") + s"function $name : " + typ.toString
+    (if (tree.modifiers.isEmpty) "" else s"${tree.modifiers} ") + s"function $name : " + typ.toString
 
   scope.owner = this
 
@@ -146,12 +151,27 @@ class MethodSymbol(tree: SyntaxTree.MethodDef, val typ: FunType, val scope: Form
 
   val isStatic: Boolean = tree.isStatic
 
+  val isAbstract: Boolean = tree.isAbstract
+
   private var main = false
 
   /** Is this method the main method? */
   def isMain: Boolean = main
 
   def setMain(): Unit = main = true
+}
+
+class LambdaSymbol(val pos: Pos, var typ: FunType, val scope: FormalScope) extends FuncSymbol {
+  scope.owner = this
+
+  override def name: String = s"lambda@${pos}"
+
+  override def str: String = s"function $name : $typ"
+
+  def setReturnType(t: Type): LambdaSymbol = {
+    this.typ = FunType(typ.args, t)
+    this
+  }
 }
 
 /**
@@ -161,7 +181,7 @@ class MethodSymbol(tree: SyntaxTree.MethodDef, val typ: FunType, val scope: Form
   * @param typ  type
   * @param pos  position
   */
-class LocalVarSymbol(val name: String, val typ: Type, val pos: Pos) extends Symbol with VarSymbol {
+class LocalVarSymbol(val name: String, var typ: Type, val pos: Pos) extends Symbol with VarSymbol {
 
   type Typ = Type
 
@@ -172,7 +192,16 @@ class LocalVarSymbol(val name: String, val typ: Type, val pos: Pos) extends Symb
   def isParam: Boolean = domain.isFormal
 
   override def str: String = s"variable " + (if (isParam) "@" else "") + s"$name : $typ"
+
+  def setType(typ: Type): this.type = {
+    this.typ = typ
+    this
+  }
+
+  var isInitializing = false
 }
+
+case object DummyLocalVar extends LocalVarSymbol("<dummy>", NoType, NoPos)
 
 object LocalVarSymbol {
 
@@ -189,7 +218,6 @@ object SymbolImplicit {
       *
       * @example If `x` is annotated with a [[ClassSymbol]], then {{{ x.symbol }}} gives you {{{ x.annot: ClassSymbol
       * }}}.
-      *
       * @return the annotation
       */
     def symbol: S = self.annot

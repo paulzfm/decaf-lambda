@@ -8,7 +8,7 @@ import decaf.frontend.tree.TreeNode.Id
   *
   * @see [[TreeTmpl]]
   */
-object SyntaxTree extends TreeTmpl {
+trait SyntaxTreeTmpl extends TreeTmpl {
 
   /**
     * Dummy annotation.
@@ -26,47 +26,30 @@ object SyntaxTree extends TreeTmpl {
 
   type No = NoAnnot.type
 
+  type StmtAnnot = No
+  type ExprAnnot = No
+
+  type ClassRef = Id
+
+  case class VarSel(receiver: Option[Expr], id: Id)(implicit val annot: ExprAnnot) extends LValue
+
+  case class Call(method: Expr, args: List[Expr])(implicit val annot: ExprAnnot) extends Expr
+}
+
+object SyntaxTree extends SyntaxTreeTmpl {
   type TopLevelAnnot = No
   type ClassAnnot = No
   type MemberVarAnnot = No
   type LocalVarAnnot = No
   type MethodAnnot = No
   type TypeLitAnnot = No
-  type StmtAnnot = No
   type BlockAnnot = No
-  type ExprAnnot = No
 
-  type ClassRef = Id
+  type ClassRef1 = Id
 
-  // The following nodes only appear in a syntax tree.
+  case class Lambda(args: List[LocalVarDef], body: Expr)(implicit val annot: ExprAnnot) extends Expr
 
-  /**
-    * Field selection, or simply a local variable.
-    * {{{
-    *   (receiver '.')? variable
-    * }}}
-    *
-    * @param receiver target instance
-    * @param variable identifier of the selected variable
-    */
-  case class VarSel(receiver: Option[Expr], variable: Id)(implicit val annot: ExprAnnot) extends LValue {
-
-    def withReceiver(receiver: Expr): VarSel = VarSel(Some(receiver), variable)(annot).setPos(pos)
+  case class BlockLambda(args: List[LocalVarDef], body: Block)(implicit val annot: ExprAnnot) extends Expr {
+    override def productPrefix: String = "Lambda"
   }
-
-  /**
-    * Call.
-    * {{{
-    *   (receiver '.')? method '(' arg1 ','  arg2 ',' ... ')'
-    * }}}
-    *
-    * @param receiver target instance, `this` if not given
-    * @param method   identifier of the selected method
-    * @param args     arguments
-    */
-  case class Call(receiver: Option[Expr], method: Id, args: List[Expr])(implicit val annot: ExprAnnot) extends Expr {
-
-    def withReceiver(receiver: Expr): Call = Call(Some(receiver), method, args)(annot).setPos(pos)
-  }
-
 }

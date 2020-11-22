@@ -55,7 +55,6 @@ sealed trait Scope extends Annot {
     * Get a symbol with name `key`.
     *
     * @see [[find]]
-    *
     * @param key symbol's name
     * @return the matched symbol, or throws [[NoSuchElementException]] if not found
     */
@@ -125,16 +124,25 @@ class ClassScope(val parent: Option[ClassScope] = None) extends Scope {
     * Owner, a class symbol whose members are defined in this class scope.
     */
   var owner: ClassSymbol = _
+
+  lazy val methods: List[MethodSymbol] = values.flatMap {
+    case m: MethodSymbol => Some(m)
+    case _ => None
+  }
+}
+
+trait LocalOrFormalScope extends Scope {
+  override def isLocalOrFormal: Boolean = true
+
+  def traverse(p: Symbol => Unit): Unit
 }
 
 /**
   * Formal scope: stores function parameter symbols.
   */
-class FormalScope extends Scope {
+class FormalScope extends LocalOrFormalScope {
 
   type Item = LocalVarSymbol
-
-  override def isLocalOrFormal: Boolean = true
 
   override def isFormal: Boolean = true
 
@@ -144,17 +152,22 @@ class FormalScope extends Scope {
   val nestedScope: LocalScope = new LocalScope
 
   /**
-    * Owner, a method symbol whose parameters are defined in this formal scope.
+    * Owner, a function symbol whose parameters are defined in this formal scope.
     */
-  var owner: MethodSymbol = _
+  var owner: FuncSymbol = _
+
+  override def traverse(p: Symbol => Unit): Unit = {
+    symbols.values.foreach(p)
+    nestedScope.traverse(p)
+  }
 }
 
 /**
   * Local scope: stores locally-defined variable symbol.
   */
-class LocalScope extends Scope {
+class LocalScope extends LocalOrFormalScope {
 
-  type Item = LocalVarSymbol
+  type Item = Symbol
 
   override def isLocalOrFormal: Boolean = true
 
@@ -170,7 +183,12 @@ class LocalScope extends Scope {
     * }}}
     * although block 2 is not a direct child of block 1, block 2 is still directly nested in block 1.
     */
-  val nestedScopes: mutable.ArrayBuffer[LocalScope] = new mutable.ArrayBuffer[LocalScope]
+  val nestedScopes: mutable.ArrayBuffer[LocalOrFormalScope] = new mutable.ArrayBuffer[LocalOrFormalScope]
+
+  override def traverse(p: Symbol => Unit): Unit = {
+    symbols.values.foreach(p)
+    nestedScopes.foreach(_.traverse(p))
+  }
 }
 
 /**
@@ -197,9 +215,16 @@ class LocalScope extends Scope {
   * @see [[Scope]]
   */
 class ScopeContext private(val global: GlobalScope, private val scopes: List[Scope], val currentScope: Scope,
-                           val currentClass: ClassSymbol, val currentMethod: MethodSymbol) {
+                           val currentClass: ClassSymbol, val currentMethod: MethodSymbol, val currentFormal: FormalScope) {
 
-  def this(globalScope: GlobalScope) = this(globalScope, Nil, globalScope, null, null)
+  def this(globalScope: GlobalScope) = this(globalScope, Nil, globalScope, null, null, null)
+
+  def indexOf(scope: Scope): Int = scopes.indexOf(scope)
+
+  def inLambda: Boolean = {
+    (currentFormal != null) &&
+      (currentFormal.owner == null || currentFormal.owner.isInstanceOf[LambdaSymbol])
+  }
 
   /**
     * Open a new scope.
@@ -209,11 +234,15 @@ class ScopeContext private(val global: GlobalScope, private val scopes: List[Sco
     */
   def open(scope: Scope): ScopeContext = scope match {
     case s: ClassScope => s.parent match {
-      case Some(ps) => new ScopeContext(global, s :: open(ps).scopes, s, s.owner, null)
-      case None => new ScopeContext(global, s :: scopes, s, s.owner, null)
+      case Some(ps) => new ScopeContext(global, s :: open(ps).scopes, s, s.owner, null, null)
+      case None => new ScopeContext(global, s :: scopes, s, s.owner, null, null)
     }
-    case s: FormalScope => new ScopeContext(global, s :: scopes, s, currentClass, s.owner)
-    case s: LocalScope => new ScopeContext(global, s :: scopes, s, currentClass, currentMethod)
+    case s: FormalScope =>
+      s.owner match {
+        case m: MethodSymbol => new ScopeContext(global, s :: scopes, s, currentClass, m, s)
+        case _ => new ScopeContext(global, s :: scopes, s, currentClass, currentMethod, s)
+      }
+    case s: LocalScope => new ScopeContext(global, s :: scopes, s, currentClass, currentMethod, currentFormal)
   }
 
   /**
@@ -279,6 +308,11 @@ class ScopeContext private(val global: GlobalScope, private val scopes: List[Sco
     case _ => lookup(key)
   }
 
+  def findConflictBefore(key: String, pos: Pos): Option[Symbol] = currentScope match {
+    case s if s.isLocalOrFormal => findWhile(key, _.isLocalOrFormal, x => x.pos < pos).orElse(global.find(key))
+    case _ => lookup(key)
+  }
+
   /**
     * Declare a symbol in the current scope.
     *
@@ -295,7 +329,6 @@ object ScopeImplicit {
       * Access a node that is annotated with a [[Scope]] by the field name `scope`.
       *
       * @example If `x` is annotated with a [[ClassScope]], then {{{ x.scope }}} gives you {{{ x.annot: ClassScope }}}.
-      *
       * @return the annotation
       */
     def scope: S = self.annot

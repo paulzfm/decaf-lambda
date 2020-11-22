@@ -22,6 +22,10 @@ THIS:           'this';
 VOID:           'void';
 WHILE:          'while';
 
+ABSTRACT:       'abstract';
+VAR:            'var';
+FUN:            'fun';
+
 // Operators
 
 ASSIGN:         '=';
@@ -39,6 +43,8 @@ LE:             '<=';
 LT:             '<';
 GE:             '>=';
 GT:             '>';
+
+ARROW:          '=>';
 
 // Separators
 

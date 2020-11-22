@@ -32,6 +32,7 @@ trait TreeTmpl {
   type ExprAnnot <: Annot
 
   type ClassRef
+  type ClassRef1
 
   type Tree = TopLevel // root
 
@@ -53,10 +54,11 @@ trait TreeTmpl {
     * @param parent parent class
     * @param fields fields/members
     */
-  case class ClassDef(id: Id, parent: Option[ClassRef], fields: List[Field])(implicit val annot: ClassAnnot)
+  case class ClassDef(modifiers: Modifiers, id: Id, parent: Option[ClassRef1], fields: List[Field])
+                     (implicit val annot: ClassAnnot)
     extends Def with Annotated[ClassAnnot] {
 
-    def parentDetached: ClassDef = ClassDef(id, None, fields)(annot).setPos(pos)
+    def parentDetached: ClassDef = ClassDef(modifiers, id, None, fields)(annot).setPos(pos)
 
     def methods: List[MethodDef] = fields.flatMap {
       case m: MethodDef => Some(m)
@@ -106,11 +108,13 @@ trait TreeTmpl {
     * @param params     parameters, each is a typed identifier (or _formal_, as said in the language specification)
     * @param body       method body (a statement block)
     */
-  case class MethodDef(modifiers: Modifiers, id: Id, returnType: TypeLit, params: List[LocalVarDef], body: Block)
-                      (implicit val annot: MethodAnnot)
+  case class MethodDef(modifiers: Modifiers, id: Id, returnType: TypeLit, params: List[LocalVarDef],
+                       body: Option[Block])(implicit val annot: MethodAnnot)
     extends Field with Annotated[MethodAnnot] {
 
     def isStatic: Boolean = modifiers.isStatic
+
+    def isAbstract: Boolean = modifiers.isAbstract
   }
 
   /**
@@ -152,6 +156,8 @@ trait TreeTmpl {
     */
   case class TArray(elemType: TypeLit)(implicit val annot: TypeLitAnnot) extends TypeLit
 
+  case class TLambda(retType: TypeLit, argTypes: List[TypeLit])(implicit val annot: TypeLitAnnot) extends TypeLit
+
   /**
     * Statement.
     */
@@ -177,6 +183,24 @@ trait TreeTmpl {
     type TypeLitType = TypeLit
 
     override def productArity: Int = 3
+  }
+
+  case class UntypedLocalVarDef(id: Id, init: Expr, assignPos: Pos = NoPos)(implicit val annot: LocalVarAnnot)
+    extends Stmt with Var with Annotated[LocalVarAnnot] {
+
+    override def productArity: Int = 3
+
+    override def productElement(n: Int): Any = n match {
+      case 0 => None
+      case 1 => id
+      case 2 => init
+    }
+
+    override def productPrefix: String = "LocalVarDef"
+
+    override type TypeLitType = Null
+
+    override val typeLit = null
   }
 
   /**
@@ -429,5 +453,4 @@ trait TreeTmpl {
     * Cast the given object `obj` into class type `to`.
     */
   case class ClassCast(obj: Expr, to: ClassRef)(implicit val annot: ExprAnnot) extends Expr
-
 }

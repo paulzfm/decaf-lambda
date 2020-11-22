@@ -1,7 +1,7 @@
 package decaf.frontend.parsing
 
 import decaf.frontend.tree.SyntaxTree.{Block, Stmt}
-import org.antlr.v4.runtime.{ParserRuleContext, Token}
+import org.antlr.v4.runtime.{CharStream, ParserRuleContext, Token, TokenSource}
 
 object Util {
 
